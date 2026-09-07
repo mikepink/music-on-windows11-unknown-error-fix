@@ -26,11 +26,10 @@ re-sign-in:
 - [UnknownErrorInvestigation.md](UnknownErrorInvestigation.md): the full investigation. Environment ruled out,
   the app's own ETW logs decoded, failing vs. good request sequences, the cached state located, bisection, root-cause
   statement, what remains uncertain, and steps to check your own machine.
-- [Install-AppleMusicFix.ps1](Install-AppleMusicFix.ps1): installs a user-level scheduled task (no admin needed)
-  that deletes the cache file above while Apple Music is closed, at most once per 24 hours. Run it with
-  `-Uninstall` to remove everything it installed.
+- [Install-AppleMusicFix.ps1](Install-AppleMusicFix.ps1): installs a user-level scheduled task that keeps the
+  problem from coming back. See below.
 
-## Quick manual fix
+## One-time manual fix
 
 With Apple Music closed:
 
@@ -39,6 +38,37 @@ Remove-Item "$env:LOCALAPPDATA\Publishers\nzyj5cx40ttqa\com.apple.MediaServices\
 ```
 
 Then relaunch the app. No sign-out or library loss.
+
+## Preventive fix: install the scheduled task
+
+The installer registers a scheduled task under your own user account (no admin rights needed) that deletes the
+cache file while Apple Music is closed, at most once per 24 hours. The app fetches a fresh certificate on its next
+launch, so the cached copy never gets stale enough to trigger the error.
+
+Download or clone this repo, open PowerShell in the repo folder, and run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-AppleMusicFix.ps1
+```
+
+`-ExecutionPolicy Bypass` is needed because Windows blocks unsigned scripts by default. It applies only to this one
+command and does not change your system's execution policy.
+
+What it installs:
+
+- `%LOCALAPPDATA%\AppleMusic-fix\Reset-AppleMusicMediaServicesCache.ps1`, the script that does the deletion.
+- A scheduled task named **Apple Music - MediaServices cache reset** that runs it one minute after logon and then
+  every hour. The task exits immediately if Apple Music is running or the file was already deleted in the last
+  24 hours.
+- A `cleanup.log` next to the script with one line per deletion.
+
+The installer also runs the reset once right away, which is a harmless no-op if Apple Music is open.
+
+To remove the task and everything it installed:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-AppleMusicFix.ps1 -Uninstall
+```
 
 ## Who did the work
 
