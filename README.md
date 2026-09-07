@@ -1,5 +1,7 @@
 # Apple Music for Windows: "An unknown error has occurred" fix
 
+*Unofficial. Not affiliated with or endorsed by Apple.*
+
 Root-cause investigation and a preventive workaround for the Apple Music for Windows (Microsoft Store) failure
 where, after a successful sign-in, every page shows **"An unknown error has occurred."** with a **Try Again**
 button that never helps. Only a full app Reset plus re-sign-in clears it, and it comes back every few weeks.

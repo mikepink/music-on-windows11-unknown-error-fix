@@ -1,4 +1,5 @@
 # Install-AppleMusicFix.ps1
+# SPDX-License-Identifier: MIT
 #
 # Run once as your normal Windows user (no admin needed):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-AppleMusicFix.ps1
