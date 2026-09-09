@@ -2,7 +2,86 @@
 
 *Date of investigation: 2026-09-07. Single machine. Personal identifiers redacted (`<user>`, `<DSID>`, `<machineID>`).*
 
+---
+
+## Correction (2026-09-09): the trigger is the app's WinINet cache entry, not the `data` file
+
+Two days after this investigation, with the preventive task from this repo installed, the error came back. The
+`data` file named below as the culprit **did not exist** at the time: it had been absent since the 2026-09-07
+bisection, the app never recreated it, and the scheduled task had never deleted anything. So the root cause stated in
+sections 9, 11 and 13 is wrong, or at best incomplete. Everything in this section was established on the same machine
+on 2026-09-09, using the same methods (flushed ETW logs, one-change-at-a-time relaunches, window captures).
+
+**The failure was identical.** Both the UI process and the backend logged `StoreMescalSessionCert` → store-request
+error 7504, `Error initializing Mescal session. Invalid data received`, then the 7502 cascade, exactly as on 9/7.
+
+**The certificate was coming from the app's own HTTP cache.** The app's WinINet cache lives under the package folder:
+
+```
+%LOCALAPPDATA%\Packages\AppleInc.AppleMusicWin_nzyj5cx40ttqa\AC\INetCache\<random subfolder>\setupCert[1].xml
+```
+
+Timing of the `setupCert.plist` request, from URL line to "Processing base response", tells a cache hit from a fetch:
+
+| Session | Time to response | Outcome |
+|---|---|---|
+| 2026-08-31 | 91 ms | network fetch, OK |
+| 2026-09-02 | 10 ms | cache hit, OK |
+| 2026-09-04 | 8 ms | cache hit, OK |
+| 2026-09-08 (UI, then backend) | 115 ms, then 6 ms | fetch, then cache hit, OK |
+| 2026-09-09 12:13 (UI, then backend) | 101 ms, then 6 ms | revalidation (cache file untouched), then cache hit, **7504** |
+| 2026-09-09 control relaunch | 6 ms | cache hit, **7504** |
+| 2026-09-09 with the cache entry moved aside | 82 ms, then 7 ms | fetch, then cache hit, **OK** |
+
+**Bisection.** A control relaunch with nothing changed failed again. Moving only the `setupCert[1].xml` file aside made
+the next launch fetch the certificate from the network, set up the Mescal session, and render Home with personalised
+content and zero 7504/7502 errors. The app immediately wrote a new cache entry, and later launches used it fine.
+
+**What was in the bad entry.** The file moved aside was 2171 bytes and started with the gzip magic bytes `1F 8B`. It is
+byte-for-byte the CDN's compressed response body: its SHA-256 (`1926ed96e6c55b81…`) equals that of
+`curl -H "Accept-Encoding: gzip" https://s.mzstatic.com/sap/setupCert.plist`. Decompressed, it is the correct plist
+(SHA-256 `059b5061d8c54bc1…`, identical to the uncompressed body the CDN serves). The entry the app wrote on the
+successful launch is the plain 3257-byte plist. So nothing was corrupt or expired: the app read gzip-compressed bytes
+back out of its own HTTP cache and tried to parse them as the plist. That is what "Invalid data received" means here.
+
+**Why it sticks until a Reset.** `setupCert.plist` has not changed since 2016, so every revalidation returns
+`304 Not Modified` and the cached entry survives. Try Again re-reads the same entry. A full app Reset wipes the `AC`
+folder along with everything else, which is why only Reset ever cleared it.
+
+**Reinterpreting 9/7.** The `AC\INetCache` folder's own modification time is 2026-09-07 14:31:09, the same second as
+the successful launch in section 10, which means a cache entry was created or removed at that moment. Moving the
+`data` file coincided with that. The `data` file was never shown to be necessary or sufficient, and the "expiry margin"
+reasoning in sections 9, 11 and 12 should be disregarded.
+
+**The cache evicts the entry on its own.** Later the same day, while the app was running and nothing else touched
+the folder, the fresh `setupCert[1].xml` disappeared from the cache at 12:38:39, ten minutes after the app had written
+about 30 MB of video-preview files into the same cache (single files up to 18 MB). That is consistent with WinINet's
+size-based scavenging of the per-app cache. So whether the entry exists at a given launch, and which of the app's HTTP
+clients last (re)wrote it, depends on eviction timing. That is a plausible reason the failure is intermittent rather
+than permanent, and it is why the workaround below deletes the entry at every opportunity instead of trying to
+predict when it is bad.
+
+**Still not established.**
+
+- Which component stores the compressed variant. The bad entry carried a write time of 2026-09-08 13:11:33, an hour
+  into a good session, and neither process logged a certificate request at that time. The app has more than one HTTP
+  client (the native store-request layer and the JavaScript "JetEngine" UI layer), and a plausible mechanism is one
+  client caching the response with `Content-Encoding: gzip` and the other not decoding on cache hits. Not proven.
+- The reverse test (putting the compressed entry back and confirming the failure returns) was not run.
+- Whether the `data` file plays any role at all. The workaround no longer touches it.
+
+**Fix that matches the evidence.** With Apple Music closed, delete every `setupCert*.xml` under
+`%LOCALAPPDATA%\Packages\AppleInc.AppleMusicWin_nzyj5cx40ttqa\AC\INetCache\`. The next launch fetches a fresh copy.
+The installer in this repo now does exactly that after every app exit, at logon, and hourly; see the README.
+
+---
+
 ## Summary
+
+> **Superseded on 2026-09-09.** The conclusion below was disproved when the error returned with the `data` file
+> absent. The actual trigger is a gzip-compressed copy of the certificate response in the app's WinINet cache. See the
+> [Correction](#correction-2026-09-09-the-trigger-is-the-apps-wininet-cache-entry-not-the-data-file) section, which
+> follows the summary. The observations in sections 1–8 and 10 stand; the interpretation in 9, 11 and 13 does not.
 
 Apple Music for Windows (Microsoft Store app, version 1.1540.23042.0) periodically stopped working with
 **"An unknown error has occurred."** and a **Try Again** button that never helped. Only a full app Reset plus
@@ -265,6 +344,8 @@ No further steps were needed. Before step 1, three launches that day with the fi
 
 ## 11. Root cause statement
 
+> **Superseded on 2026-09-09.** See the Correction section near the top. Kept for the record.
+
 Apple Music for Windows caches the Mescal signing certificate with an expiration computed from the CDN response's
 `Date` header plus `max-age`. On launch, when the cached entry is stale by some margin, the client reports the cached
 data as invalid (7504) instead of refetching it, and the missing Mescal session makes every store request fail (7502).
@@ -289,6 +370,9 @@ persists. A full app Reset "fixes" it only because it deletes this file along wi
 ---
 
 ## 13. Fix and workaround
+
+> **Superseded on 2026-09-09.** The workaround below deleted the wrong file and did not prevent the recurrence. The
+> current fix is in the Correction section and in the README.
 
 **Immediate fix (what was done):** quit Apple Music, move
 `%LOCALAPPDATA%\Publishers\nzyj5cx40ttqa\com.apple.MediaServices\data` to a backup folder, relaunch. No sign-out,
@@ -316,13 +400,15 @@ fact that the cached blob matches the server copy.
 1. Quit Apple Music. Open the folder
    `%LOCALAPPDATA%\Packages\AppleInc.AppleMusicWin_nzyj5cx40ttqa\LocalState\Logs`.
 2. Decode the newest `Log-AMPLibraryAgent-*.etl` with
-   `tracerpt <file> -o out.csv -of CSV -y` and search `out.csv` for `7504` and `Mescal`.
-3. If you see `Error requesting Mescal setup cert` / `store-request error 7504`, look at
-   `%LOCALAPPDATA%\Publishers\nzyj5cx40ttqa\com.apple.MediaServices\data`. Its
-   `mescal-certificate-expiration` value will be in the past.
-4. Delete that one file (app closed) and relaunch. Nothing else needs to be reset.
+   `tracerpt <file> -o out.csv -of CSV -y` and search `out.csv` for `7504` and `Invalid data received`.
+3. If they are there, look under `%LOCALAPPDATA%\Packages\AppleInc.AppleMusicWin_nzyj5cx40ttqa\AC\INetCache\`
+   (every subfolder) for a file named `setupCert*.xml`. On the affected machine the bad copy was 2171 bytes and began
+   with the bytes `1F 8B` (gzip); a good copy is a 3257-byte plain-text plist beginning with `<plist>`.
+4. Delete that file with the app closed, then relaunch. Nothing else needs to be reset and you stay signed in:
 
----
+   ```powershell
+   Get-ChildItem "$env:LOCALAPPDATA\Packages\AppleInc.AppleMusicWin_nzyj5cx40ttqa\AC\INetCache" -Recurse -Force -Filter "setupCert*" | Remove-Item -Force
+   ```
 
 ## Appendix A: benign errors present in every session
 
